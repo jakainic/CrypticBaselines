@@ -61,6 +61,74 @@ def parse_data_file(data_path: str) -> List[Dict[str, Any]]:
     
     return examples
 
+def run_model_efficient(
+    model: BaseModel, 
+    examples: List[Dict[str, Any]], 
+    batch_size: int = 10,
+    delay: float = 0.0,
+    max_examples: Optional[int] = None
+) -> List[EnhancedRecord]:
+    """Run model efficiently in batch mode for faster processing"""
+    
+    if max_examples:
+        examples = examples[:max_examples]
+    
+    records = []
+    
+    # Process in batches
+    for i in tqdm(range(0, len(examples), batch_size), desc=f"Running {model.get_name()} in batches"):
+        batch = examples[i:i + batch_size]
+        
+        try:
+            # Generate batch answers
+            answers = model.generate_batch_answers(batch, batch_size)
+            
+            # Create records for this batch
+            for j, (example, answer) in enumerate(zip(batch, answers)):
+                record = EnhancedRecord(
+                    clue=example['clue'],
+                    length=example.get('length', ''),
+                    answer=example.get('answer', ''),
+                    candidates=[{"answer": answer, "confidence": 1.0, "reasoning": "Efficient mode answer"}] if answer else [],
+                    picked=answer,
+                    model_name=model.get_name(),
+                    timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+                    metadata={
+                        "example_index": i + j,
+                        "batch_index": i // batch_size,
+                        "efficient_mode": True
+                    }
+                )
+                records.append(record)
+            
+            # Add delay between batches
+            if delay > 0 and i + batch_size < len(examples):
+                time.sleep(delay)
+                
+        except Exception as e:
+            print(f"Batch {i//batch_size + 1} failed: {e}")
+            # Create error records for this batch
+            for j, example in enumerate(batch):
+                record = EnhancedRecord(
+                    clue=example['clue'],
+                    length=example.get('length', ''),
+                    answer=example.get('answer', ''),
+                    candidates=[],
+                    picked=None,
+                    model_name=model.get_name(),
+                    timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+                    metadata={
+                        "example_index": i + j,
+                        "batch_index": i // batch_size,
+                        "efficient_mode": True,
+                        "error": str(e),
+                        "error_type": "Exception"
+                    }
+                )
+                records.append(record)
+    
+    return records
+
 def run_model_on_examples(
     model: BaseModel, 
     examples: List[Dict[str, Any]], 
@@ -264,24 +332,18 @@ def parse_length(length: str) -> int:
             return 0
 
 def main():
-    parser = argparse.ArgumentParser(description='Enhanced harness for running models on cryptic crossword data')
-    parser.add_argument('--data', required=True, help='Path to input data file (CSV or JSON)')
-    parser.add_argument('--out', required=True, help='Path to output predictions file')
-    parser.add_argument('--model', default='stub', choices=['stub', 'openai', 'anthropic', 'gemini'], 
-                       help='Model type to use')
-    parser.add_argument('--model-args', nargs='*', help='Additional model arguments (key=value format)')
+    parser = argparse.ArgumentParser(description='Run cryptic crossword model evaluation')
+    parser.add_argument('--data', required=True, help='Path to data file (CSV or JSON)')
+    parser.add_argument('--out', required=True, help='Output file path')
+    parser.add_argument('--model', required=True, help='Model to use')
     parser.add_argument('--k', type=int, default=5, help='Number of candidates to generate')
-    parser.add_argument('--delay', type=float, default=0.0, help='Delay between API calls (seconds)')
-    parser.add_argument('--max-examples', type=int, help='Maximum number of examples to process')
-    parser.add_argument('--seed', type=int, help='Random seed for reproducibility')
+    parser.add_argument('--max-examples', type=int, help='Maximum examples to process')
+    parser.add_argument('--delay', type=float, default=0.0, help='Delay between API calls')
+    parser.add_argument('--model-args', nargs='*', help='Model arguments (key=value format)')
+    parser.add_argument('--efficient', action='store_true', help='Use efficient mode (single answers, no probabilities)')
+    parser.add_argument('--batch-size', type=int, default=10, help='Batch size for efficient processing')
     
     args = parser.parse_args()
-    
-    # Set random seed if specified
-    if args.seed is not None:
-        random.seed(args.seed)
-        import numpy as np
-        np.random.seed(args.seed)
     
     # Parse model arguments
     model_kwargs = {}
@@ -293,8 +355,10 @@ def main():
     
     # Initialize model
     try:
-        model = get_model(args.model, **model_kwargs)
+        model = get_model(args.model, efficient_mode=args.efficient, **model_kwargs)
         print(f"Initialized {args.model} model: {model.get_name()}")
+        if args.efficient:
+            print(f"Using efficient mode with batch size: {args.batch_size}")
     except Exception as e:
         print(f"Error initializing model: {e}")
         return
@@ -305,14 +369,24 @@ def main():
     print(f"Loaded {len(examples)} examples")
     
     # Run model
-    print(f"Running model with k={args.k} candidates")
-    records = run_model_on_examples(
-        model=model,
-        examples=examples,
-        k=args.k,
-        delay=args.delay,
-        max_examples=args.max_examples
-    )
+    if args.efficient:
+        print(f"Running model in efficient mode (single answers)")
+        records = run_model_efficient(
+            model=model,
+            examples=examples,
+            batch_size=args.batch_size,
+            delay=args.delay,
+            max_examples=args.max_examples
+        )
+    else:
+        print(f"Running model with k={args.k} candidates")
+        records = run_model_on_examples(
+            model=model,
+            examples=examples,
+            k=args.k,
+            delay=args.delay,
+            max_examples=args.max_examples
+        )
     
     # Save results
     print(f"Saving {len(records)} records to {args.out}")

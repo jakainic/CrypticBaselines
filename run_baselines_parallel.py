@@ -44,7 +44,9 @@ def create_experiment_config(
     output_dir: str,
     k: int = 5,
     max_examples: Optional[int] = None,
-    delay: float = 0.0
+    delay: float = 0.0,
+    efficient: bool = False,
+    batch_size: int = 10
 ) -> Dict[str, Any]:
     """Create experiment configuration"""
     config = {
@@ -54,6 +56,8 @@ def create_experiment_config(
         'k': k,
         'max_examples': max_examples,
         'delay': delay,
+        'efficient': efficient,
+        'batch_size': batch_size,
         'models': models,
         'experiments': []
     }
@@ -76,7 +80,9 @@ def run_single_experiment(
     k: int = 5,
     max_examples: Optional[int] = None,
     delay: float = 0.0,
-    model_args: List[str] = None
+    model_args: List[str] = None,
+    efficient: bool = False,
+    batch_size: int = 10
 ) -> Dict[str, Any]:
     """Run a single model experiment - returns result dict for parallel execution"""
     
@@ -94,6 +100,9 @@ def run_single_experiment(
     if delay > 0:
         cmd.extend(['--delay', str(delay)])
     
+    if efficient:
+        cmd.extend(['--efficient', '--batch-size', str(batch_size)])
+    
     if model_args:
         cmd.extend(['--model-args'] + model_args)
     
@@ -101,7 +110,7 @@ def run_single_experiment(
     start_time = time.time()
     
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=14400)  # 4 hour timeout
         end_time = time.time()
         
         return {
@@ -118,8 +127,8 @@ def run_single_experiment(
             'model': model,
             'success': False,
             'output_file': output_file,
-            'error': 'Timeout after 1 hour',
-            'runtime': 3600
+            'error': 'Timeout after 4 hours',
+            'runtime': 14400
         }
     except subprocess.CalledProcessError as e:
         return {
@@ -170,7 +179,9 @@ def run_models_parallel(
                 k=config['k'],
                 max_examples=config['max_examples'],
                 delay=config['delay'],
-                model_args=model_args
+                model_args=model_args,
+                efficient=config['efficient'],
+                batch_size=config['batch_size']
             )
             
             future_to_experiment[future] = experiment
@@ -238,6 +249,8 @@ def main():
     parser.add_argument('--skip-eval', action='store_true', help='Skip evaluation (only run models)')
     parser.add_argument('--model-args', nargs='*', help='Additional model arguments (model:key=value format)')
     parser.add_argument('--max-workers', type=int, help='Maximum number of parallel workers')
+    parser.add_argument('--efficient', action='store_true', help='Use efficient mode (single answers, no probabilities)')
+    parser.add_argument('--batch-size', type=int, default=10, help='Batch size for efficient processing')
     
     args = parser.parse_args()
     
@@ -264,7 +277,9 @@ def main():
         output_dir=str(output_dir),
         k=args.k,
         max_examples=args.max_examples,
-        delay=args.delay
+        delay=args.delay,
+        efficient=args.efficient,
+        batch_size=args.batch_size
     )
     
     # Save configuration

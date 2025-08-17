@@ -34,8 +34,9 @@ class BaseModel(ABC):
 class LLMModel(BaseModel):
     """Single configurable wrapper for different LLM providers"""
     
-    def __init__(self, provider: str = "stub", **config):
+    def __init__(self, provider: str = "stub", efficient_mode: bool = False, **config):
         self.provider = provider
+        self.efficient_mode = efficient_mode  # New flag for fast processing mode
         self.config = config
         
         # Configure based on provider
@@ -44,14 +45,14 @@ class LLMModel(BaseModel):
             if not api_key:
                 raise ValueError("OpenAI API key required. Set OPENAI_API_KEY environment variable or pass api_key parameter.")
             self.client = openai.OpenAI(api_key=api_key)
-            self.model_name = config.get('model_name', 'gpt-4')
+            self.model_name = config.get('model_name', 'gpt-5')
             
         elif provider == "anthropic":
             api_key = config.get('api_key') or os.environ.get('ANTHROPIC_API_KEY')
             if not api_key:
                 raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY environment variable or pass api_key parameter.")
             self.client = anthropic.Anthropic(api_key=api_key)
-            self.model_name = config.get('model_name', 'claude-3-sonnet')
+            self.model_name = config.get('model_name', 'claude-4-sonnet-20250219')
             
         elif provider == "gemini":
             if not GOOGLE_AVAILABLE:
@@ -75,10 +76,33 @@ class LLMModel(BaseModel):
         if self.provider == "stub":
             return self._generate_stub_candidates(clue, length, k)
         else:
-            return self._generate_llm_candidates(clue, length, k)
+            if self.efficient_mode:
+                return self._generate_efficient_answer(clue, length)
+            else:
+                return self._generate_llm_candidates(clue, length, k)
+    
+    def generate_batch_answers(self, clues: List[Dict[str, str]], batch_size: int = 10) -> List[str]:
+        """Generate answers for multiple clues in batches for maximum efficiency"""
+        if self.provider == "stub":
+            return [self._generate_stub_candidates(c['clue'], c['length'], 1) for c in clues]
+        
+        if self.efficient_mode:
+            return self._generate_batch_efficient(clues, batch_size)
+        else:
+            return [self._generate_llm_candidates(c['clue'], c['length'], 1) for c in clues]
     
     def _generate_stub_candidates(self, clue: str, length: str, k: int = 5) -> str:
         """Generate random candidates for testing"""
+        if self.efficient_mode:
+            # In efficient mode, just return a simple answer
+            target_len = self._parse_length(length)
+            if target_len:
+                answer = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ', k=target_len))
+            else:
+                answer = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ', k=random.randint(3, 8)))
+            return answer
+        
+        # Original behavior for detailed mode
         target_len = self._parse_length(length)
         
         candidates_data = []
@@ -100,6 +124,126 @@ class LLMModel(BaseModel):
         candidates_data.sort(key=lambda x: x['confidence'], reverse=True)
         return json.dumps({"candidates": candidates_data}, indent=2)
     
+    def _generate_efficient_answer(self, clue: str, length: str) -> str:
+        """Generate a single answer efficiently without probabilities for fast processing"""
+        target_len = self._parse_length(length)
+        prompt = f"""Solve this cryptic crossword clue and provide just the answer.
+
+Clue: "{clue}"
+Target length: {target_len if target_len else "any length"}
+
+Respond with only the answer in uppercase letters, nothing else."""
+        
+        try:
+            if self.provider == "openai":
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": "You are an expert cryptic crossword solver. Provide only the answer in uppercase letters."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=50,
+                    temperature=0.1
+                )
+                content = response.choices[0].message.content.strip().upper()
+                
+            elif self.provider == "anthropic":
+                response = self.client.messages.create(
+                    model=self.model_name,
+                    max_tokens=50,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                content = response.content[0].text.strip().upper()
+                
+            elif self.provider == "gemini":
+                response = self.client.generate_content(prompt)
+                content = response.text.strip().upper()
+            
+            # Clean up the response to just get the answer
+            content = re.sub(r'[^A-Z\s]', '', content).strip()
+            return content
+            
+        except Exception as e:
+            raise Exception(f"{self.provider} API error: {e}")
+
+    def _generate_batch_efficient(self, clues: List[Dict[str, str]], batch_size: int) -> List[str]:
+        """Generate answers for multiple clues efficiently using batching"""
+        results = []
+        
+        for i in range(0, len(clues), batch_size):
+            batch = clues[i:i + batch_size]
+            batch_prompt = self._build_batch_prompt(batch)
+            
+            try:
+                if self.provider == "openai":
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[
+                            {"role": "system", "content": "You are an expert cryptic crossword solver. Provide only the answers in uppercase letters, one per line."},
+                            {"role": "user", "content": batch_prompt}
+                        ],
+                        max_tokens=batch_size * 20,
+                        temperature=0.1
+                    )
+                    content = response.choices[0].message.content.strip()
+                    
+                elif self.provider == "anthropic":
+                    response = self.client.messages.create(
+                        model=self.model_name,
+                        max_tokens=batch_size * 20,
+                        messages=[{"role": "user", "content": batch_prompt}]
+                    )
+                    content = response.content[0].text.strip()
+                    
+                elif self.provider == "gemini":
+                    response = self.client.generate_content(batch_prompt)
+                    content = response.text.strip()
+                
+                # Parse batch response into individual answers
+                batch_answers = self._parse_batch_response(content, len(batch))
+                results.extend(batch_answers)
+                
+            except Exception as e:
+                # Fall back to individual processing for this batch
+                print(f"Batch processing failed, falling back to individual: {e}")
+                for clue in batch:
+                    try:
+                        answer = self._generate_efficient_answer(clue['clue'], clue['length'])
+                        results.append(answer)
+                    except Exception as e2:
+                        print(f"Failed to process clue: {e2}")
+                        results.append("")
+        
+        return results
+    
+    def _build_batch_prompt(self, clues: List[Dict[str, str]]) -> str:
+        """Build a prompt for processing multiple clues at once"""
+        prompt_lines = ["Solve these cryptic crossword clues and provide just the answers."]
+        
+        for i, clue in enumerate(clues, 1):
+            target_len = self._parse_length(clue['length'])
+            prompt_lines.append(f"{i}. Clue: \"{clue['clue']}\" | Length: {target_len if target_len else 'any'}")
+        
+        prompt_lines.append("\nRespond with only the answers in uppercase letters, one per line, in order.")
+        return "\n".join(prompt_lines)
+    
+    def _parse_batch_response(self, content: str, expected_count: int) -> List[str]:
+        """Parse a batch response into individual answers"""
+        lines = [line.strip().upper() for line in content.split('\n') if line.strip()]
+        
+        # Clean up each line to just get letters and spaces
+        cleaned_lines = []
+        for line in lines:
+            cleaned = re.sub(r'[^A-Z\s]', '', line).strip()
+            if cleaned:
+                cleaned_lines.append(cleaned)
+        
+        # Ensure we have the right number of answers
+        while len(cleaned_lines) < expected_count:
+            cleaned_lines.append("")
+        
+        return cleaned_lines[:expected_count]
+
     def _generate_llm_candidates(self, clue: str, length: str, k: int = 5) -> str:
         """Generate candidates using the configured LLM provider"""
         target_len = self._parse_length(length)
