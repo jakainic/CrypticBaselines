@@ -46,7 +46,8 @@ def create_experiment_config(
     max_examples: Optional[int] = None,
     delay: float = 0.0,
     efficient: bool = False,
-    batch_size: int = 10
+    batch_size: int = 10,
+    extended_prompt: bool = False
 ) -> Dict[str, Any]:
     """Create experiment configuration"""
     config = {
@@ -59,7 +60,8 @@ def create_experiment_config(
         'efficient': efficient,
         'batch_size': batch_size,
         'models': models,
-        'experiments': []
+        'experiments': [],
+        'extended_prompt': extended_prompt
     }
     
     for model in models:
@@ -82,7 +84,8 @@ def run_single_experiment(
     delay: float = 0.0,
     model_args: List[str] = None,
     efficient: bool = False,
-    batch_size: int = 10
+    batch_size: int = 10,
+    extended_prompt: bool = False
 ) -> Dict[str, Any]:
     """Run a single model experiment - returns result dict for parallel execution"""
     
@@ -102,6 +105,9 @@ def run_single_experiment(
     
     if efficient:
         cmd.extend(['--efficient', '--batch-size', str(batch_size)])
+    
+    if extended_prompt:
+        cmd.extend(['--extended-prompt'])
     
     if model_args:
         cmd.extend(['--model-args'] + model_args)
@@ -181,7 +187,8 @@ def run_models_parallel(
                 delay=config['delay'],
                 model_args=model_args,
                 efficient=config['efficient'],
-                batch_size=config['batch_size']
+                batch_size=config['batch_size'],
+                extended_prompt=config['extended_prompt']
             )
             
             future_to_experiment[future] = experiment
@@ -251,6 +258,7 @@ def main():
     parser.add_argument('--max-workers', type=int, help='Maximum number of parallel workers')
     parser.add_argument('--efficient', action='store_true', help='Use efficient mode (single answers, no probabilities)')
     parser.add_argument('--batch-size', type=int, default=10, help='Batch size for efficient processing')
+    parser.add_argument('--extended-prompt', action='store_true', help='Use extended prompt with cryptic solving guidance')
     
     args = parser.parse_args()
     
@@ -279,7 +287,8 @@ def main():
         max_examples=args.max_examples,
         delay=args.delay,
         efficient=args.efficient,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        extended_prompt=args.extended_prompt
     )
     
     # Save configuration

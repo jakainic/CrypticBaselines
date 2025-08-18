@@ -159,7 +159,6 @@ def run_model_on_examples(
                 
                 raw_response = model.generate_candidates(
                     clue=example['clue'],
-                    length=example.get('length', ''),
                     k=k
                 )
                 
@@ -342,6 +341,7 @@ def main():
     parser.add_argument('--model-args', nargs='*', help='Model arguments (key=value format)')
     parser.add_argument('--efficient', action='store_true', help='Use efficient mode (single answers, no probabilities)')
     parser.add_argument('--batch-size', type=int, default=10, help='Batch size for efficient processing')
+    parser.add_argument('--extended-prompt', action='store_true', help='Use extended prompt with cryptic solving guidance')
     
     args = parser.parse_args()
     
@@ -355,10 +355,12 @@ def main():
     
     # Initialize model
     try:
-        model = get_model(args.model, efficient_mode=args.efficient, **model_kwargs)
+        model = get_model(args.model, efficient_mode=args.efficient, extended_prompt=args.extended_prompt, **model_kwargs)
         print(f"Initialized {args.model} model: {model.get_name()}")
         if args.efficient:
             print(f"Using efficient mode with batch size: {args.batch_size}")
+        if args.extended_prompt:
+            print("Using extended prompt with cryptic solving guidance")
     except Exception as e:
         print(f"Error initializing model: {e}")
         return

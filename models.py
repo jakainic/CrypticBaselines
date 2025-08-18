@@ -23,7 +23,7 @@ class BaseModel(ABC):
     """Abstract base class for all models"""
     
     @abstractmethod
-    def generate_candidates(self, clue: str, length: str, k: int = 5) -> str:
+    def generate_candidates(self, clue: str, k: int = 5) -> str:
         """Generate k candidate answers with probabilities. Returns raw response string."""
         pass
     
@@ -34,9 +34,10 @@ class BaseModel(ABC):
 class LLMModel(BaseModel):
     """Single configurable wrapper for different LLM providers"""
     
-    def __init__(self, provider: str = "stub", efficient_mode: bool = False, **config):
+    def __init__(self, provider: str = "stub", efficient_mode: bool = False, extended_prompt: bool = False, **config):
         self.provider = provider
         self.efficient_mode = efficient_mode  # New flag for fast processing mode
+        self.extended_prompt = extended_prompt  # New flag for enhanced prompts
         self.config = config
         
         # Configure based on provider
@@ -52,7 +53,7 @@ class LLMModel(BaseModel):
             if not api_key:
                 raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY environment variable or pass api_key parameter.")
             self.client = anthropic.Anthropic(api_key=api_key)
-            self.model_name = config.get('model_name', 'claude-4-sonnet-20250219')
+            self.model_name = config.get('model_name', 'claude-3-5-sonnet-20241022')
             
         elif provider == "gemini":
             if not GOOGLE_AVAILABLE:
@@ -71,15 +72,15 @@ class LLMModel(BaseModel):
         else:
             raise ValueError(f"Unknown provider: {provider}. Available: stub, openai, anthropic, gemini")
     
-    def generate_candidates(self, clue: str, length: str, k: int = 5) -> str:
+    def generate_candidates(self, clue: str, k: int = 5) -> str:
         """Generate candidates using the configured provider"""
         if self.provider == "stub":
-            return self._generate_stub_candidates(clue, length, k)
+            return self._generate_stub_candidates(clue, k)
         else:
             if self.efficient_mode:
-                return self._generate_efficient_answer(clue, length)
+                return self._generate_efficient_answer(clue)
             else:
-                return self._generate_llm_candidates(clue, length, k)
+                return self._generate_llm_candidates(clue, k)
     
     def generate_batch_answers(self, clues: List[Dict[str, str]], batch_size: int = 10) -> List[str]:
         """Generate answers for multiple clues in batches for maximum efficiency"""
@@ -124,13 +125,15 @@ class LLMModel(BaseModel):
         candidates_data.sort(key=lambda x: x['confidence'], reverse=True)
         return json.dumps({"candidates": candidates_data}, indent=2)
     
-    def _generate_efficient_answer(self, clue: str, length: str) -> str:
+    def _generate_efficient_answer(self, clue: str) -> str:
         """Generate a single answer efficiently without probabilities for fast processing"""
-        target_len = self._parse_length(length)
-        prompt = f"""Solve this cryptic crossword clue and provide just the answer.
+        
+        if self.extended_prompt:
+            prompt = self._build_extended_prompt(clue)
+        else:
+            prompt = f"""Solve this cryptic crossword clue and provide just the answer.
 
 Clue: "{clue}"
-Target length: {target_len if target_len else "any length"}
 
 Respond with only the answer in uppercase letters, nothing else."""
         
@@ -165,6 +168,42 @@ Respond with only the answer in uppercase letters, nothing else."""
             
         except Exception as e:
             raise Exception(f"{self.provider} API error: {e}")
+
+    def _build_extended_prompt(self, clue: str) -> str:
+        """Build an extended prompt with cryptic crossword solving guidance"""
+        return f"""You are an expert cryptic crossword clue solver. Cryptic crossword clue contains three elements:
+
+1. Definition (of the answer, often found at the start or end of the clue)
+2. Indicator (indicates the type of wordplay)
+3. Fodder (for the wordplay)
+
+Common indicators:
+-anagram indicators: "confused", "broken", "upset", etc.
+-container indicators: "possessing", "hugging", "holding", etc.
+-hidden word indicators: "held in", "a bit of", "part of", etc.
+-reversal indicators: "backwards", "flipped", "held up", etc.
+-deletion indicators: "missing", "cut", "absent", etc.
+-letter position indicators: "first", "head", "middle", etc.
+-homophone indicators: "said", "heard", "reportedly", etc.
+
+Note: double definition and charade clues don't have indicator words, 
+but they generally give a sense of one thing following another.
+
+EXAMPLES:
+"Bird seen in the museum (3)" -> "seen in" indicates containment, and length is 3 -> "EMU"
+"Honestly crazy, in secret (2,3,3)" -> "crazy" indicates an anagram, and length is 2+3+3=8 -> "ONTHESLY"
+"Stringed instrument untruthful person heard (4)" -> "heard" indicates homophone and the length is 4 -> "LYRE"
+"Wear out an important part of a car (4)" -> no clear indicator words and legnth is 4 -> "TIRE"
+"Returned beer of kings (5)" -> "returned" indicates reversal and length is 5 -> "LAGER"
+
+POSSIBLE ANALYSIS STEPS:
+1. Identify the definition, indicator, and fodder
+2. Apply the wordplay to get the answer
+3. Verify the answer fits the length requirement
+
+Clue: "{clue}"
+
+Provide ONLY the answer in uppercase letters, nothing else."""
 
     def _generate_batch_efficient(self, clues: List[Dict[str, str]], batch_size: int) -> List[str]:
         """Generate answers for multiple clues efficiently using batching"""
@@ -208,7 +247,7 @@ Respond with only the answer in uppercase letters, nothing else."""
                 print(f"Batch processing failed, falling back to individual: {e}")
                 for clue in batch:
                     try:
-                        answer = self._generate_efficient_answer(clue['clue'], clue['length'])
+                        answer = self._generate_efficient_answer(clue['clue'])
                         results.append(answer)
                     except Exception as e2:
                         print(f"Failed to process clue: {e2}")
@@ -218,14 +257,52 @@ Respond with only the answer in uppercase letters, nothing else."""
     
     def _build_batch_prompt(self, clues: List[Dict[str, str]]) -> str:
         """Build a prompt for processing multiple clues at once"""
-        prompt_lines = ["Solve these cryptic crossword clues and provide just the answers."]
-        
-        for i, clue in enumerate(clues, 1):
-            target_len = self._parse_length(clue['length'])
-            prompt_lines.append(f"{i}. Clue: \"{clue['clue']}\" | Length: {target_len if target_len else 'any'}")
-        
-        prompt_lines.append("\nRespond with only the answers in uppercase letters, one per line, in order.")
-        return "\n".join(prompt_lines)
+        if self.extended_prompt:
+            return self._build_extended_batch_prompt(clues)
+        clues_block = "\n".join([f'{i}. Clue: "{clue["clue"]}"' for i, clue in enumerate(clues, 1)])
+        return f"""Solve these cryptic crossword clues and provide just the answers.
+
+{clues_block}
+
+Respond with only the answers in uppercase letters, one per line, in order."""
+    
+    def _build_extended_batch_prompt(self, clues: List[Dict[str, str]]) -> str:
+        """Build an extended batch prompt with cryptic crossword solving guidance"""
+        clues_block = "\n".join([f'{i}. Clue: "{clue["clue"]}"' for i, clue in enumerate(clues, 1)])
+        return f"""You are an expert cryptic crossword solver. Cryptic crossword clue contains three elements:
+
+1. Definition (of the answer, often found at the start or end of the clue)
+2. Indicator (indicates the type of wordplay)
+3. Fodder (for the wordplay)
+
+Common indicators:
+-anagram indicators: "confused", "broken", "upset", etc.
+-container indicators: "possessing", "hugging", "holding", etc.
+-hidden word indicators: "held in", "a bit of", "part of", etc.
+-reversal indicators: "backwards", "flipped", "held up", etc.
+-deletion indicators: "missing", "cut", "absent", etc.
+-letter position indicators: "first", "head", "middle", etc.
+-homophone indicators: "said", "heard", "reportedly", etc.
+
+Note: double definition and charade clues don't have indicator words, 
+but they generally give a sense of one thing following another.
+
+EXAMPLES:
+"Bird seen in the museum (3)" -> "seen in" indicates containment, and length is 3 -> "EMU"
+"Honestly crazy, in secret (2,3,3)" -> "crazy" indicates an anagram, and length is 2+3+3=8 -> "ONTHESLY"
+"Stringed instrument untruthful person heard (4)" -> "heard" indicates homophone and the length is 4 -> "LYRE"
+"Wear out an important part of a car (4)" -> no clear indicator words and legnth is 4 -> "TIRE"
+"Returned beer of kings (5)" -> "returned" indicates reversal and length is 5 -> "LAGER"
+
+POSSIBLE ANALYSIS STEPS:
+1. Identify the definition, indicator, and fodder
+2. Apply the wordplay to get the answer
+3. Verify the answer fits the length requirement
+
+CLUES TO SOLVE:
+{clues_block}
+
+Respond with only the answers in uppercase letters, one per line, in order."""
     
     def _parse_batch_response(self, content: str, expected_count: int) -> List[str]:
         """Parse a batch response into individual answers"""
@@ -244,10 +321,9 @@ Respond with only the answer in uppercase letters, nothing else."""
         
         return cleaned_lines[:expected_count]
 
-    def _generate_llm_candidates(self, clue: str, length: str, k: int = 5) -> str:
+    def _generate_llm_candidates(self, clue: str, k: int = 5) -> str:
         """Generate candidates using the configured LLM provider"""
-        target_len = self._parse_length(length)
-        prompt = self._build_prompt(clue, length, target_len, k)
+        prompt = self._build_prompt(clue, k)
         
         try:
             if self.provider == "openai":
@@ -280,8 +356,11 @@ Respond with only the answer in uppercase letters, nothing else."""
             # Don't fall back to stub - let the error bubble up
             raise Exception(f"{self.provider} API error: {e}")
     
-    def _build_prompt(self, clue: str, length: str, target_len: Optional[int], k: int) -> str:
+    def _build_prompt(self, clue: str, k: int) -> str:
         """Build the prompt for LLM providers"""
+        if self.extended_prompt:
+            return self._build_extended_json_prompt(clue, k)
+        
         # Build the correct number of example candidates
         example_candidates = []
         for i in range(k):
@@ -293,7 +372,57 @@ Respond with only the answer in uppercase letters, nothing else."""
         return f"""Solve this cryptic crossword clue and provide {k} candidate answer{'s' if k > 1 else ''} with confidence scores.
 
 Clue: "{clue}"
-Target length: {target_len if target_len else "any length"}
+
+Please respond with exactly {k} candidate{'s' if k > 1 else ''} in this JSON format:
+{{
+  "candidates": [
+{examples_text}
+  ]
+}}
+
+Ensure all answers are uppercase and the confidence scores are between 0 and 1. Only return valid JSON."""
+
+    def _build_extended_json_prompt(self, clue: str, k: int) -> str:
+        """Build an extended JSON prompt with cryptic crossword solving guidance"""
+        # Build the correct number of example candidates
+        example_candidates = []
+        for i in range(k):
+            confidence = 0.95 - (i * 0.1)
+            example_candidates.append(f'    {{"answer": "ANSWER{i+1}", "confidence": {confidence:.2f}, "reasoning": "brief explanation"}}')
+        
+        examples_text = ',\n'.join(example_candidates)
+        
+        return f"""You are an expert cryptic crossword clue solver. Cryptic crossword clue contains three elements:
+
+1. Definition (of the answer, often found at the start or end of the clue)
+2. Indicator (indicates the type of wordplay)
+3. Fodder (for the wordplay)
+
+Common indicators:
+-anagram indicators: "confused", "broken", "upset", etc.
+-container indicators: "possessing", "hugging", "holding", etc.
+-hidden word indicators: "held in", "a bit of", "part of", etc.
+-reversal indicators: "backwards", "flipped", "held up", etc.
+-deletion indicators: "missing", "cut", "absent", etc.
+-letter position indicators: "first", "head", "middle", etc.
+-homophone indicators: "said", "heard", "reportedly", etc.
+
+Note: double definition and charade clues don't have indicator words, 
+but they generally give a sense of one thing following another.
+
+EXAMPLES:
+"Bird seen in the museum (3)" -> "seen in" indicates containment, and length is 3 -> "EMU"
+"Honestly crazy, in secret (2,3,3)" -> "crazy" indicates an anagram, and length is 2+3+3=8 -> "ONTHESLY"
+"Stringed instrument untruthful person heard (4)" -> "heard" indicates homophone and the length is 4 -> "LYRE"
+"Wear out an important part of a car (4)" -> no clear indicator words and legnth is 4 -> "TIRE"
+"Returned beer of kings (5)" -> "returned" indicates reversal and length is 5 -> "LAGER"
+
+POSSIBLE ANALYSIS STEPS:
+1. Identify the definition, indicator, and fodder
+2. Apply the wordplay to get the answer
+3. Verify the answer fits the length requirement
+
+Clue: "{clue}"
 
 Please respond with exactly {k} candidate{'s' if k > 1 else ''} in this JSON format:
 {{
